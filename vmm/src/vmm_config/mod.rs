@@ -18,6 +18,8 @@ pub mod logger;
 pub mod machine_config;
 /// Wrapper for configuring the network devices attached to the microVM.
 pub mod net;
+/// Wrapper for configuring syscall whitelist.
+pub mod syscall_whitelist_config;
 /// Wrapper for configuring the vsock devices attached to the microVM.
 pub mod vsock;
 

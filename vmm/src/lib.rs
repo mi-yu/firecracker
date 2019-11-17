@@ -96,6 +96,9 @@ use vmm_config::net::{
     NetworkInterfaceConfig, NetworkInterfaceConfigs, NetworkInterfaceError,
     NetworkInterfaceUpdateConfig,
 };
+use vmm_config::syscall_whitelist_config::{
+    get_whitelist_config_for_toolchain, SyscallWhitelistConfig, SyscallWhitelistConfigError,
+};
 use vmm_config::vsock::{VsockDeviceConfig, VsockError};
 use vstate::{KvmContext, Vcpu, Vm};
 
@@ -378,6 +381,8 @@ pub struct VmmConfig {
     machine_config: Option<VmConfig>,
     #[serde(rename = "vsock")]
     vsock_device: Option<VsockDeviceConfig>,
+    #[serde(rename = "syscall-whitelist", default)]
+    syscall_whitelist: Vec<SyscallWhitelistConfig>,
 }
 
 /// Contains the state and associated methods required for the Firecracker VMM.
@@ -409,6 +414,7 @@ pub struct Vmm {
 
     // The level of seccomp filtering used. Seccomp filters are loaded before executing guest code.
     seccomp_level: u32,
+    syscall_whitelist: Vec<i64>,
 }
 
 impl Vmm {
@@ -460,6 +466,7 @@ impl Vmm {
             epoll_context,
             write_metrics_event_fd,
             seccomp_level,
+            syscall_whitelist: vec![],
         })
     }
 
@@ -948,11 +955,17 @@ impl Vmm {
             }
 
             let seccomp_level = self.seccomp_level;
+            let syscall_whitelist = self.syscall_whitelist.clone();
             self.vcpus_handles.push(
                 thread::Builder::new()
                     .name(format!("fc_vcpu{}", cpu_id))
                     .spawn(move || {
-                        vcpu.run(vcpu_thread_barrier, seccomp_level, vcpu_exit_evt);
+                        vcpu.run(
+                            vcpu_thread_barrier,
+                            seccomp_level,
+                            syscall_whitelist,
+                            vcpu_exit_evt,
+                        );
                     })
                     .map_err(StartMicrovmError::VcpuSpawn)?,
             );
@@ -1460,6 +1473,20 @@ impl Vmm {
         }
     }
 
+    /// Set syscall whitelist for guest.
+    pub fn set_syscall_whitelist(&mut self, configs: &[SyscallWhitelistConfig]) -> UserResult {
+        if self.is_instance_initialized() {
+            Err(VmmActionError::VsockConfig(
+                ErrorKind::User,
+                VsockError::UpdateNotAllowedPostBoot,
+            ))
+        } else {
+            let whitelist = get_whitelist_config_for_toolchain(configs)?;
+            self.syscall_whitelist = whitelist;
+            Ok(())
+        }
+    }
+
     /// Updates the path of the host file backing the emulated block device with id `drive_id`.
     pub fn set_block_device_path(&mut self, drive_id: String, path_on_host: String) -> UserResult {
         // Get the block device configuration specified by drive_id.
@@ -1614,10 +1641,7 @@ impl Vmm {
     }
 
     /// Configures Vmm resources as described by the `config_json` param.
-    pub fn configure_from_json(
-        &mut self,
-        config_json: String,
-    ) -> std::result::Result<(), VmmActionError> {
+    pub fn configure_from_json(&mut self, config_json: String) -> UserResult {
         let vmm_config = serde_json::from_slice::<VmmConfig>(config_json.as_bytes())
             .unwrap_or_else(|e| {
                 error!("Invalid json: {}", e);
@@ -1640,6 +1664,8 @@ impl Vmm {
         if let Some(vsock_config) = vmm_config.vsock_device {
             self.set_vsock_device(vsock_config)?;
         }
+        self.set_syscall_whitelist(&vmm_config.syscall_whitelist)?;
+
         Ok(())
     }
 }
@@ -3168,7 +3194,14 @@ mod tests {
                             "vcpu_count": 2,
                             "mem_size_mib": 1024,
                             "ht_enabled": false
-                     }}
+                     }},
+                     "syscall-whitelist": [
+                         {{
+                             "arch": "x86_64",
+                             "toolchain": "musl",
+                             "syscalls": [39, 41]
+                         }}
+                     ]
             }}"#,
             kernel_file.path().to_str().unwrap(),
             rootfs_file.path().to_str().unwrap()

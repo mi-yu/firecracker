@@ -3,7 +3,7 @@
 
 use seccomp::{
     Error, SeccompAction, SeccompCmpArgLen as ArgLen, SeccompCmpOp::Eq, SeccompCondition as Cond,
-    SeccompRule, SECCOMP_LEVEL_ADVANCED, SECCOMP_LEVEL_BASIC, SECCOMP_LEVEL_NONE,
+    SeccompFilter, SeccompRule, SECCOMP_LEVEL_ADVANCED, SECCOMP_LEVEL_BASIC, SECCOMP_LEVEL_NONE,
 };
 
 #[macro_use]
@@ -23,6 +23,29 @@ pub fn set_seccomp_level(seccomp_level: u32) -> Result<(), Error> {
         SECCOMP_LEVEL_NONE => Ok(()),
         _ => Err(Error::InvalidLevel),
     }
+}
+
+/// Applies the configured level of seccomp filtering along with a custom syscall whitelist.
+pub fn set_seccomp_level_and_whitelist(seccomp_level: u32, whitelist: &[i64]) -> Result<(), Error> {
+    // TODO: dedupe whitelist with default list
+    // TODO: make default action configurable as well
+    let mut base_filter = match seccomp_level {
+        SECCOMP_LEVEL_ADVANCED => default_filter()?,
+        SECCOMP_LEVEL_BASIC => default_filter()?.allow_all(),
+        SECCOMP_LEVEL_NONE => SeccompFilter::new(vec![].into_iter().collect(), SeccompAction::Trap).unwrap(),
+        _ => return Err(Error::InvalidLevel),
+    };
+
+    for syscall in whitelist {
+        base_filter
+            .add_rules(
+                *syscall,
+                vec![SeccompRule::new(vec![], SeccompAction::Allow)], // default to Allow for now
+            )
+            .unwrap();
+    }
+
+    base_filter.apply()
 }
 
 // See include/uapi/asm-generic/fcntl.h in the kernel code.
