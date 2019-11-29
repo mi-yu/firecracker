@@ -27,12 +27,12 @@ pub fn set_seccomp_level(seccomp_level: u32) -> Result<(), Error> {
 
 /// Applies the configured level of seccomp filtering along with a custom syscall whitelist.
 pub fn set_seccomp_level_and_whitelist(seccomp_level: u32, whitelist: &[i64]) -> Result<(), Error> {
-    // TODO: dedupe whitelist with default list
-    // TODO: make default action configurable as well
     let mut base_filter = match seccomp_level {
         SECCOMP_LEVEL_ADVANCED => default_filter()?,
         SECCOMP_LEVEL_BASIC => default_filter()?.allow_all(),
-        SECCOMP_LEVEL_NONE => SeccompFilter::new(vec![].into_iter().collect(), SeccompAction::Trap).unwrap(),
+        SECCOMP_LEVEL_NONE => {
+            SeccompFilter::new(vec![].into_iter().collect(), SeccompAction::Trap).unwrap()
+        }
         _ => return Err(Error::InvalidLevel),
     };
 
@@ -187,6 +187,15 @@ mod tests {
         thread::spawn(move || {
             let filter = default_filter().unwrap();
             add_syscalls_install_filter(filter);
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn test_set_seccomp_level_and_whitelist() {
+        thread::spawn(move || {
+            assert!(set_seccomp_level_and_whitelist(1, &EXTRA_SYSCALLS).is_ok());
         })
         .join()
         .unwrap();

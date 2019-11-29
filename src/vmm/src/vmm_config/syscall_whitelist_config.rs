@@ -1,7 +1,5 @@
 // Copyright 2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
-
-use serde::{de, Deserialize};
 use std::fmt;
 
 pub use error::{ErrorKind, VmmActionError};
@@ -38,33 +36,24 @@ impl fmt::Display for SyscallWhitelistConfigError {
 #[serde(deny_unknown_fields)]
 pub struct SyscallWhitelistConfig {
     /// Architecture to whitelist syscalls for.
-    #[serde(
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "validate_arch"
-    )]
-    pub arch: Option<String>,
+    pub arch: String,
 
     /// Toolchain to whitelist syscalls for.
-    #[serde(
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "validate_toolchain"
-    )]
-    pub toolchain: Option<String>,
+    pub toolchain: String,
 
     /// List of syscall numbers for given architecture and toolchain.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub syscalls: Option<Vec<i64>>,
+    pub syscalls: Vec<i64>,
 }
 
 impl fmt::Display for SyscallWhitelistConfig {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let arch = self.arch.clone().unwrap();
-        let toolchain = self.toolchain.clone().unwrap();
+        let arch = &self.arch;
+        let toolchain = &self.toolchain;
         let syscalls = &self.syscalls;
 
         write!(
             f,
-            "{{ \"arch\": {:?}, \"toolchain\": {:?},  \"syscalls\": {:?}",
+            "{{ \"arch\": {:?}, \"toolchain\": {:?},  \"syscalls\": {:?} }}",
             arch, toolchain, syscalls
         )
     }
@@ -87,60 +76,43 @@ pub fn get_whitelist_config_for_toolchain(
     let arch = "aarch64";
 
     let config = configs.iter().find(|&config| {
-        let cfg_arch = config.arch.as_ref().map(|s| String::as_str(s)).unwrap();
-        let cfg_toolchain = config
-            .toolchain
-            .as_ref()
-            .map(|s| String::as_str(s))
-            .unwrap();
+        let cfg_arch = &config.arch;
+        let cfg_toolchain = &config.toolchain;
+
         cfg_arch == arch && cfg_toolchain == toolchain
     });
 
-    let syscalls = match config {
-        Some(config) => &config.syscalls,
-        None => return Ok(vec![]), // default to empty list if we don't find a matching arch-toolchain tuple
-    };
-
-    match syscalls {
-        Some(syscalls) => Ok(syscalls.to_vec()),
-        None => Ok(vec![]),
+    match config {
+        Some(config) => Ok(config.syscalls.to_vec()),
+        None => Ok(vec![]), // default to empty list if we don't find a matching arch-toolchain tuple
     }
 }
 
-fn validate_arch<'de, D>(d: D) -> std::result::Result<Option<String>, D::Error>
-where
-    D: de::Deserializer<'de>,
-{
-    let val = Option::<String>::deserialize(d)?;
+/// Validates a list of syscall whitelist configs so that user errors such as
+/// configuring unsupported architectures do not fail silently.
+pub fn validate_whitelist_configs(
+    configs: &[SyscallWhitelistConfig],
+) -> std::result::Result<(), VmmActionError> {
+    for config in configs.iter() {
+        let cfg_arch = &config.arch;
+        let cfg_toolchain = &config.toolchain;
 
-    if let Some(ref value) = val {
-        if *value != "x86_64" && *value != "aarch64" {
-            return Err(de::Error::invalid_value(
-                de::Unexpected::Str(&val.unwrap()),
-                &"unknown architecture supplied, must be \"x86_64\" or \"aarch64\"",
+        if cfg_arch != "x86_64" && cfg_arch != "aarch64" {
+            return Err(VmmActionError::SyscallWhitelist(
+                ErrorKind::User,
+                SyscallWhitelistConfigError::InvalidArchitecture,
+            ));
+        }
+
+        if cfg_toolchain != "gnu" && cfg_toolchain != "musl" {
+            return Err(VmmActionError::SyscallWhitelist(
+                ErrorKind::User,
+                SyscallWhitelistConfigError::InvalidToolchain,
             ));
         }
     }
 
-    Ok(val)
-}
-
-fn validate_toolchain<'de, D>(d: D) -> std::result::Result<Option<String>, D::Error>
-where
-    D: de::Deserializer<'de>,
-{
-    let val = Option::<String>::deserialize(d)?;
-
-    if let Some(ref value) = val {
-        if *value != "musl" && *value != "gnu" {
-            return Err(de::Error::invalid_value(
-                de::Unexpected::Str(&val.unwrap()),
-                &"unknown architecture supplied, must be \"musl\" or \"gnu\"",
-            ));
-        }
-    }
-
-    Ok(val)
+    Ok(())
 }
 
 #[cfg(test)]
@@ -149,17 +121,25 @@ mod tests {
 
     #[test]
     fn test_whitelist_config_for_toolchain() {
-        // Assuming we are running on an x86-gnu target
+        #[cfg(target_env = "musl")]
+        let toolchain = "musl";
+        #[cfg(target_env = "gnu")]
+        let toolchain = "gnu";
+
+        #[cfg(target_arch = "x86_64")]
+        let arch = "x86_64";
+        #[cfg(target_arch = "aarch64")]
+        let arch = "aarch64";
+
         let mut test_configs = vec![SyscallWhitelistConfig {
-            arch: Some(String::from("x86_64")),
-            toolchain: Some(String::from("gnu")),
-            syscalls: Some(vec![39, 40]),
+            arch: String::from(arch),
+            toolchain: String::from(toolchain),
+            syscalls: vec![39, 40],
         }];
 
         let mut selected_config = get_whitelist_config_for_toolchain(&test_configs);
         assert!(selected_config.is_ok());
         assert_eq!(vec![39, 40], selected_config.unwrap());
-
 
         test_configs = vec![];
 
@@ -170,13 +150,64 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_whitelist_configs() {
+        let mut test_configs = vec![SyscallWhitelistConfig {
+            arch: String::from("unknown"),
+            toolchain: String::from("musl"),
+            syscalls: vec![1, 2, 3],
+        }];
+
+        match validate_whitelist_configs(&test_configs) {
+            Err(VmmActionError::SyscallWhitelist(
+                ErrorKind::User,
+                SyscallWhitelistConfigError::InvalidArchitecture,
+            )) => (),
+            _ => unreachable!(),
+        }
+
+        test_configs = vec![SyscallWhitelistConfig {
+            arch: String::from("x86_64"),
+            toolchain: String::from("unknown"),
+            syscalls: vec![1, 2, 3],
+        }];
+
+        match validate_whitelist_configs(&test_configs) {
+            Err(VmmActionError::SyscallWhitelist(
+                ErrorKind::User,
+                SyscallWhitelistConfigError::InvalidToolchain,
+            )) => (),
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
     fn test_display_whitelist_config_error() {
         let expected_str = "Supplied architecture for syscall whitelist config is unsupported. \
                             Only \"aarch64\" or \"x86_64\" are currently supported.";
-        assert_eq!(SyscallWhitelistConfigError::InvalidArchitecture.to_string(), expected_str);
+        assert_eq!(
+            SyscallWhitelistConfigError::InvalidArchitecture.to_string(),
+            expected_str
+        );
 
         let expected_str = "Supplied toolchain for syscall whitelist config is unsupported. \
                             Only \"musl\" or \"gnu\" are currently supported.";
-        assert_eq!(SyscallWhitelistConfigError::InvalidToolchain.to_string(), expected_str);
+        assert_eq!(
+            SyscallWhitelistConfigError::InvalidToolchain.to_string(),
+            expected_str
+        );
+    }
+
+    #[test]
+    fn test_display_syscall_whitelist_config() {
+        let expected_str =
+            "{ \"arch\": \"x86_64\", \"toolchain\": \"musl\",  \"syscalls\": [1, 2, 3] }";
+
+        let config = SyscallWhitelistConfig {
+            arch: String::from("x86_64"),
+            toolchain: String::from("musl"),
+            syscalls: vec![1, 2, 3],
+        };
+
+        assert_eq!(config.to_string(), expected_str);
     }
 }
